@@ -27,4 +27,4 @@ R, RStudio, Power BI
 
 # Output
 
-1. [R Notebook for EDA](https://dsbrillantes.github.io/IMDB-Analytics/Output/01-EDA.nb.html)
+1. [R Notebook for EDA](https://dsbrillantes.github.io/IMDB-Analytics/Scripts/01-EDA.nb.html)
