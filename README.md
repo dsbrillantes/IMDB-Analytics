@@ -3,8 +3,6 @@ David Angelo Brillantes (dsbrillantes@up.edu.ph)
 
 An end-to-end Data Science project flow encompassing data sourcing, analysis, statistical modeling, and storytelling using publicly-available IMDb.com data. This serves as a repository of scripts and files I used.
 
-------------------------------
-
 # Files
 
 1. Input
@@ -21,4 +19,4 @@ An end-to-end Data Science project flow encompassing data sourcing, analysis, st
   - Contains the Power BI .PBIX file
   - Contains the query used in importing the SQLite file into Power BI
 5. Slides
-  - Contains the presentation slides detailing most of the project
+    - Contains the presentation slides detailing most of the project
