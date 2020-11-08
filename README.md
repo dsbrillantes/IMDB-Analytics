@@ -24,3 +24,7 @@ R, RStudio, Power BI
     - Contains the query used in importing the SQLite file into Power BI
 5. Slides
     - Contains the presentation slides detailing most of the project
+
+# Output
+
+1. [R Notebook for EDA](https://dsbrillantes.github.io/IMDB-Analytics/Output/01-EDA.nb.html)
