@@ -1,0 +1,7 @@
+START: 6:30
+>>> Done with String Matching using DL, Thresh = 0.95, Top 1 Sim, Year Thresh 0 at 07:40:27 PM
+>>> Done with String Matching using DL, Thresh = 0.95, Top 1 Sim, Year Thresh 1 at 08:10:28 PM
+>>> Done with String Matching using LV, Thresh = 0.80, Top 1 Sim, Year Thresh 0 at 08:21:15 PM
+>>> Done with String Matching using LV, Thresh = 0.80, Top 1 Sim, Year Thresh 1 at 08:30:11 PM
+>>> Done with String Matching using LV, Thresh = 0.80, Top 2 Sim, Year Thresh 0 at 08:38:41 PM
+>>> Done with String Matching using LV, Thresh = 0.70, Top 2 Sim, Year Thresh 0 at 08:46:34 PM
