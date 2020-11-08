@@ -1,0 +1,1162 @@
+---
+title: "Exploratory Data Analysis"
+author: "David Angelo Brillantes (dsbrillantes@up.edu.ph)"
+date: "November 2 - 8, 2020"
+output: 
+  html_notebook: 
+    toc: yes
+    toc_depth: 2
+    highlight: zenburn
+    theme: paper
+    df_print: paged
+    code_folding: hide
+    fig_caption: yes
+header-includes:
+   - \usepackage{amsmath}
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 1000px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+
+# Setting Things Up {-}
+
+<p style="text-align:justify">
+This notebook is where I perform exploratory data analysis (EDA) on publicly-available [**IMDB**](https://www.imdb.com/) Data (retrieved Nov. 3, 2020) after cleaning and writing the tables into an SQLite database file (see `./Scripts/00 Data Sourcing.R`). According to the website's [**About**](https://help.imdb.com/article/imdb/general-information/what-is-imdb/G836CY29Z4SGNMK5?ref_=__seemr#) page,
+</p>
+
+<blockquote>
+<p style="text-align:justify">
+IMDb is the world's most popular and authoritative source for movie, TV and celebrity content, designed to help fans explore the world of movies and shows and decide what to watch.
+<br />
+<br />
+Our searchable database includes millions of movies, TV and entertainment programs and cast and crew members. We help you jog your memory about a movie, show, or person on the tip of your tongue, find the best movie or show to watch next, and empower you to share your entertainment knowledge and opinions with the world’s largest community of fans.
+</p>
+</blockquote>
+
+<p style="text-align:justify">
+Now that we're familiar with IMDB, we can now proceed with the EDA. For our purposes, we will be answering the following questions.
+</p>
+
+1. What is the highest rated movie in 2018?
+2. Who was the most popular actor in 2018?
+3. What is the longest runtime of a single movie? Aggregate runtime of a trilogy?
+4. Have there been changes in trend in movie genres in the past 10 years?
+
+<p style="text-align:justify">
+The code chunk below sets up the environment where we declare directories, set options, and load libraries.
+</p>
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_knit$set(root.dir = normalizePath("..")) # Set working directory of chunks to grandparent folder
+```
+
+```{r init, warning=FALSE}
+# << Set Options >>
+options(java.parameters = "-Xmx30g",
+        scipen = 999999,
+        dplyr.summarise.inform = FALSE)
+
+
+# << Load Libraries >>
+suppressWarnings({
+  suppressPackageStartupMessages({
+    library(DBI)
+    library(fastmatch)
+    library(lubridate)
+    library(data.table)
+    library(dplyr)
+    library(tidyr)
+    library(knitr)
+    library(purrr)
+    library(kableExtra)
+    library(tidytable)
+    library(ggplot2)
+    library(scales)
+    library(viridis)
+    library(tidytext)
+    library(stringr)
+    library(stringi)
+    library(stringdist)
+    library(reticulate)
+  })
+})
+
+# << Paths >>
+
+# Home Folders
+loc.main     <- "./"
+loc.input    <- paste0(loc.main, "Input/")
+loc.output   <- paste0(loc.main, "Output/")
+
+# Data Marts
+loc.imdb     <- paste0(loc.input, "Data/IMDB/")
+loc.imdb_db  <- paste0(loc.imdb, "imdb_movies.sqlite")
+loc.kaggle   <- paste0(loc.input, "Data/Kaggle/")
+
+# << Utility Functions >>
+pipe_message <- function(df, message = NULL, fill = 2, crayon_f = NULL) {
+  
+  # --- --- --- --- --- --- --- --- --- --- --- --- --- 
+  # --- For including messages in pipes
+  # --- --- --- --- --- --- --- --- --- --- --- --- ---
+  
+  if (!is.null(message)) {
+    if (!is.null(crayon_f)) message <- do.call(getExportedValue("crayon", crayon_f), list(message))
+    cat(message, fill = fill)
+  } 
+  return(df)
+}
+
+gcQuiet <- function(quiet = TRUE, ...) {
+  
+  # --- --- --- --- --- --- --- --- --- --- --- --- --- 
+  # --- Quiet version of gc()
+  # --- --- --- --- --- --- --- --- --- --- --- --- ---
+  
+  if (quiet) invisible(gc()) else gc(...)
+}
+```
+
+<p style="text-align:justify">
+To load the data, we simply connect to the SQLite file and make SQL queries. The Tables and their fields are shown below ([more info](https://www.imdb.com/interfaces/)).
+</p>
+
+```{r get_data, warning=FALSE}
+# Establish Connection to SQLite DB
+imdb_db   <- dbConnect(RSQLite::SQLite(), loc.imdb_db)
+  
+# List All Tables and Fields
+imdb_tabs <- lapply(dbListTables(imdb_db), function(tab) {
+    data.frame(Table = tab, Field = dbListFields(imdb_db, tab))
+  }) %>% 
+  rbindlist() %>% 
+  summarise.(Fields = toString(Field), .by = Table)
+
+kable(imdb_tabs, caption = "List of Fields for Each SQLite Table") %>% 
+  kable_styling(c("hover", "condensed", "responsive"))
+```
+
+# What is the highest rated movie in 2018?
+
+<p style="text-align:justify">
+For this question, we can directly make use of the `title_basics` and `title_rating` tables, and joining them by the unique identifier for each movie title, `tconst`. IMDB uses a **weighted average** to compute the ratings according to the [FAQs](https://help.imdb.com/article/imdb/track-movies-tv/ratings-faq/G67Y87TFYYP6TWAV#).
+</p>
+
+```{r q1, warning=FALSE}
+query.ratings.2018 <- "
+    SELECT t_basics.primaryTitle AS Title,
+           t_basics.mainGenre AS Genre,
+           t_rating.averageRating AS Rating,
+           t_rating.numVotes AS Votes
+      FROM title_basics AS t_basics
+INNER JOIN title_rating AS t_rating ON t_basics.tconst = t_rating.tconst
+     WHERE t_basics.startYear = 2018
+  ORDER BY t_rating.averageRating desc
+"
+
+ratings_2018 <- dbGetQuery(imdb_db, query.ratings.2018)
+kable(ratings_2018[1:5,], caption = "Five Highest Rated Movies of 2018") %>% 
+  kable_styling(c("hover", "condensed", "responsive"))
+```
+
+<p style="text-align:justify">
+We can see that there are movies that were able to get a perfect score of 10 in 2018. However, the above table does not take into account the raw number of votes that the movie had, which may be more useful to us. To incorporate this, we create a new variable, `Popularity` that serves as an index. It is calculated by multiplying the average rating with the number of votes. We can then split the dataset into two: movies that are below the median `Popularity` and those above it. Finally, we look at the top rated movies within those two groups. To further weed out the movies with a small number of votes, we filter the dataset to those with a number of votes above the median number of votes.
+</p>
+
+```{r q1_a}
+# Create Popularity Index & Filter by # of Votes
+ratings_2018_pop     <- ratings_2018 %>% mutate.(Popularity = Votes*Rating) %>% filter.(Votes >= median(Votes))
+ratings_2018_pop_med <- median(ratings_2018_pop$Popularity)
+
+# Split Data
+ratings_2018_pop_hi <- filter.(ratings_2018_pop, ratings_2018_pop$Popularity >= ratings_2018_pop_med) %>% slice_max.(Rating, n = 3)
+ratings_2018_pop_lo <- filter.(ratings_2018_pop, ratings_2018_pop$Popularity <  ratings_2018_pop_med) %>% slice_max.(Rating, n = 3)
+
+kable(bind_rows.(ratings_2018_pop_hi, ratings_2018_pop_lo), 
+      caption = "Three Highest Rated Movies of 2018 by Popularity",
+      format.args = list(big.mark = ",")) %>% 
+  kable_styling(c("hover", "condensed", "responsive")) %>% 
+  pack_rows("High Popularity", 1, 3) %>% 
+  pack_rows("Low Popularity", 4, 6)
+```
+
+<p style="text-align:justify">
+It's interesting to see that the highest rated films are documentaries and dramas. While we were able to incorporate the new `Popularity` index into this question, the resulting movies are still relatively unknown with a small number of votes especially considering the distribution of the votes, being skewed to the right by very popular movies. 
+</p>
+
+```{r q1_b, echo=FALSE, fig.align='center', fig.width = 16, fig.height = 5, fig.cap="The distribution of the number of votes is heavily skewed to the right. The concentration of ratings seem to be in the 6 to 9 range.", message=FALSE}
+ratings_2018 %>% 
+
+  ggplot(aes(x = Votes)) +
+  stat_boxplot(geom ='errorbar',
+               color = "grey20",
+               width = 0.5) +
+  geom_boxplot(color = "grey20",
+               fill = viridis(1, begin = 0.3),
+               alpha = 0.8,
+               outlier.size = 3, 
+               outlier.color = "orange", 
+               outlier.stroke = 0,
+               outlier.alpha = 0.2,
+               orientation = "y") + 
+
+  theme_light() +
+  theme(text = element_text(colour = "grey20", size = 12, face = "bold"),
+        axis.ticks = element_blank(), 
+        axis.text.y = element_blank(),
+        panel.border = element_rect(color = "grey20"), 
+        panel.grid = element_line(color = "grey65", linetype = "dotted"),
+        plot.margin = margin(0, 20, 0, 0)) +
+  scale_x_log10(labels = comma) +
+  labs(x = "Number of Votes (log10 Scale)",
+       title = "Boxplot of # of Votes") -> q1_b_boxplot
+
+ratings_2018 %>% 
+
+  ggplot(aes(x = Votes, y = Rating)) +
+  geom_bin2d() +
+
+  theme_light() +
+  theme(text = element_text(colour = "grey20", size = 12, face = "bold"),
+        legend.position = "none",
+        axis.ticks = element_blank(), 
+        panel.grid = element_line(color = "grey65", linetype = "dotted"),
+        panel.border = element_rect(color = "grey20"),
+        plot.margin = margin(0, 20, 0, 0)) +
+  scale_x_log10(labels = comma, expand = c(0,0)) +
+  scale_y_continuous(breaks = 1:10) +
+  scale_fill_viridis(begin = 0.3, end = 0.9) +
+  labs(x = "Number of Votes (log10 Scale)",
+       title = "2D Distribution of # of Votes and Ratings") -> q1_b_hist
+
+gridExtra::grid.arrange(q1_b_boxplot, q1_b_hist, ncol = 2)
+ggsave(paste0(loc.output, "Movie Votes.png"), 
+       gridExtra::arrangeGrob(q1_b_boxplot, q1_b_hist, ncol = 2), dpi = 320)
+```
+
+<p style="text-align:justify">
+Another approach to this question is to use the same definition that IMDB uses in curating their **Top Rated Movies** list, which shows the top rated 250 movies. This is different from the weighted average used to get each film's rating in that the "formula provides a true 'Bayesian estimate', which takes into account the number of votes each title has received, minimum votes required to be on the list, and the mean vote for all titles." The formula is given below,
+</p>
+
+$$\text{Top 250 Rating} = (\frac{v}{v+m}\cdot R)\ +\ (\frac{m}{v+m}\cdot C)$$
+
+Where
+
+- $ v $ is the number of votes for the movie
+- $ m $ is minimum votes required to be listed in the Top Rated list (currently 25,000)
+- $ R $ is the average rating of the movie, and
+- $ C $ is the mean vote across all titles
+
+<p style="text-align:justify">
+We now compute the ratings using this new formula. The only pre-filtering we do is to consider only movies with at least 25,000 votes.
+</p>
+
+```{r q1_c}
+# Create Top 250 Rating
+ratings_2018_top     <- ratings_2018 %>% 
+  filter.(Votes >= 25000) %>%
+  mutate.(`Top Rating` = (Rating*Votes/(Votes + 25000)) + (mean(Rating)*25000/(Votes + 25000)),
+          Popularity = Votes*Rating)
+ratings_2018_top_med <- median(ratings_2018_top$Popularity)
+
+# Split Data
+ratings_2018_top_hi <- filter.(ratings_2018_top, ratings_2018_top$Popularity >= ratings_2018_top_med) %>% slice_max.(`Top Rating`, n = 3)
+ratings_2018_top_lo <- filter.(ratings_2018_top, ratings_2018_top$Popularity <  ratings_2018_top_med) %>% slice_max.(`Top Rating`, n = 3)
+
+kable(bind_rows.(ratings_2018_top_hi, ratings_2018_top_lo), 
+      caption = "Three Highest Top Rated Movies of 2018 by Popularity",
+      format.args = list(big.mark = ",")) %>% 
+  kable_styling(c("hover", "condensed", "responsive")) %>% 
+  column_spec(5, background = "gold") %>% 
+  pack_rows("High Popularity", 1, 3) %>% 
+  pack_rows("Low Popularity", 4, 6)
+```
+
+<p style="text-align:justify">
+Thus, the highest rated movie of 2018 is **`r ratings_2018_top_hi$Title[1]`**.
+</p>
+
+```{r q1_clear, echo=FALSE, results='hide'}
+rm(list = ls(pattern = "q1_"), ratings_2018, 
+   ratings_2018_pop, ratings_2018_pop_hi, ratings_2018_pop_lo,
+   ratings_2018_top, ratings_2018_top_lo)
+gcQuiet()
+```
+
+# Who was the most popular actor in 2018?
+
+<p style="text-align:justify">
+For this question, we can directly make use of the `title_prin` and `name_basics` tables. We also look at both actors and actresses who assumed the leading roles in their films. There are many ways to measure actor/actress popularity. Some of these are: 
+</p>
+
+- Number of pageviews to profile
+- Number of listed credits
+- Frequency of appearance in user search queries
+- Popularity of projects
+
+<p style="text-align:justify">
+The user data used for the above and in other measures are not readily available in the datasets that we have. Instead, our next best bet is to make use of movie data and use ratings and votes as proxies for popularity wherein intuition tells us that the more popular a movie was, the more likely the actor/actress was given the spotlight. For this question, we will only look at films released in 2018.
+</p>
+
+```{r q2_a}
+query.leads.2018 <- "
+    SELECT t_basics.*,
+           t_prins.ordering,
+           t_prins.nconst,
+           t_prins.category,
+           n_basics.primaryName AS Name,
+           n_basics.mainProfession,
+           2018 - n_basics.birthYear AS FilmAgeYears
+      FROM title_prin AS t_prins
+INNER JOIN name_basics AS n_basics ON t_prins.nconst = n_basics.nconst
+INNER JOIN (    SELECT t_basics.tconst,
+                       t_basics.primaryTitle AS Title,
+                       t_basics.mainGenre AS Genre,
+                       t_rating.averageRating AS Rating,
+                       t_rating.numVotes AS Votes
+                  FROM title_basics AS t_basics
+            INNER JOIN title_rating AS t_rating ON t_basics.tconst = t_rating.tconst
+                 WHERE t_basics.startYear = 2018) AS t_basics ON t_prins.tconst = t_basics.tconst
+"
+
+leads_2018 <- dbGetQuery(imdb_db, query.leads.2018) %>% 
+  
+  # Filter to Films where they were Lead Actors/Actresses
+  filter.(stri_detect_regex(category, "actor|actress")
+        & stri_detect_regex(mainProfession, "actor|actress")) %>% 
+  filter.(ordering == min(ordering), .by = tconst) %>% 
+  mutate(Category = str_to_title(category)) %>% 
+  select.(-mainProfession, -ordering, -category)
+
+kable(leads_2018[1:10, c("Title", "Name", "Category")], 
+      caption = "First Ten Lead Actors/Actresses in Movies Released in 2018") %>% 
+  kable_styling(c("hover", "condensed", "responsive"))
+```
+
+<p style="text-align:justify">
+In creating the `Spotlight` index, we make use of the `Popularity` column we created for each movie earlier. From there, we can summarize these by Actor/Actress. We divide `Popularity` by the number of movies he/she was in so we can roughly account for how spread out his/her popularity was garnered across his/her work.
+</p>
+
+```{r q2_b}
+leads_2018_top <- leads_2018 %>% 
+  mutate.(Popularity = Votes*Rating) %>% 
+  summarise.(Spotlight = sum(Popularity)/n_distinct(tconst), 
+             Titles = toString(Title), .by = c(Name, Category)) %>% 
+  slice_max.(order_by = Spotlight, n = 5, .by = Category)
+
+kable(leads_2018_top[,c("Name", "Titles", "Spotlight")], 
+      caption = "Five Most Popular Actors/Actresses in Movies released in 2018",
+      format.args = list(big.mark = ",")) %>% 
+  kable_styling(c("hover", "condensed", "responsive")) %>% 
+  column_spec(3, background = "gold") %>% 
+  pack_rows("Actor", 1, 5) %>% 
+  pack_rows("Actress", 6, 10)
+```
+
+<p style="text-align:justify">
+Thus, the most popular actor and actress in 2018 were **`r leads_2018_top$Name[1]`** and **`r leads_2018_top$Name[6]`**. The [Top 10 Stars](https://www.businesswire.com/news/home/20181204005100/en/IMDb-Announces-the-Top-10-Stars-and-Top-10-Breakout-Stars-of-2018-as-Determined-by-Page-Views) list released by IMDB in 2018 is noticeably different as it is based on pageviews.
+</p>
+
+```{r q2_clear, echo=FALSE, results='hide'}
+rm(leads_2018)
+gcQuiet()
+```
+
+# What is the longest runtime of a single movie?
+
+<p style="text-align:justify">
+For this question, we can look at `runtimeMinutes` from the `title_basics` table.
+</p>
+
+```{r q3_a, fig.align='center', fig.width = 16, fig.height = 6, warning=FALSE, message=FALSE}
+query.runtime <- "
+   SELECT t_basics.tconst,
+          t_basics.primaryTitle AS Title,
+          t_basics.mainGenre AS Genre,
+          t_basics.startYear AS Year,
+          t_basics.runtimeMinutes AS Runtime,
+          round(t_basics.runtimeMinutes/60, 2) AS Runtime_Hours,
+          t_rating.averageRating AS Rating,
+          t_rating.numVotes AS Votes
+     FROM title_basics AS t_basics
+LEFT JOIN title_rating AS t_rating ON t_basics.tconst = t_rating.tconst
+    WHERE t_basics.runtimeMinutes IS NOT NULL
+ ORDER BY t_basics.runtimeMinutes desc
+"
+
+runtime     <- dbGetQuery(imdb_db, query.runtime)
+max_runtime <- max(runtime$Runtime_Hours)
+
+runtime %>% 
+  ggplot(aes(x = Runtime_Hours)) +
+  stat_boxplot(geom ='errorbar',
+               color = "grey20",
+               width = 0.5) +
+  geom_boxplot(color = "grey20",
+               fill = viridis(1, begin = 0.4),
+               alpha = 0.8,
+               outlier.size = 3, 
+               outlier.color = "orange", 
+               outlier.stroke = 0,
+               outlier.alpha = 0.6,
+               orientation = "y") + 
+  geom_segment(x = 750, y = 0.2,
+               xend = max_runtime - 10, yend = 0.02,
+               lineend = "round", 
+               linejoin = "mitre",
+               size = 2, 
+               arrow = arrow(length = unit(0.3, "inches"))) +
+
+  theme_light() +
+  theme(text = element_text(colour = "grey20", size = 12, face = "bold"),
+        plot.subtitle = element_text(face = "italic"),
+        axis.ticks = element_blank(), 
+        axis.text.y = element_blank(),
+        panel.border = element_rect(color = "grey20"), 
+        panel.grid = element_line(color = "grey65", linetype = "dotted"),
+        plot.margin = margin(0, 20, 0, 0)) +
+  labs(x = "Runtime (Hours)",
+       title = "Boxplot of Movie Runtime", 
+       subtitle = paste0("Longest runtime with ", max_runtime,
+                         " Hours is from ", 
+                         runtime$Title[runtime$Runtime_Hours == max_runtime],
+                         " (", runtime$Year[runtime$Runtime_Hours == max_runtime], ")."))
+
+ggsave(paste0(loc.output, "Movie Runtime Boxplot.png"), dpi = 320)
+```
+
+<p style="text-align:justify">
+The movie with the single longest runtime is [**Logistics**](https://en.wikipedia.org/wiki/Logistics_(film)), an 857-hour (or 35-day) long documentary and Swedish experimental art film conceived and created by Erika Magnusson and Daniel Andersson. To get a better look of the distribution of runtimes, we can try to keep only movies that are at most 3 hours long.
+</p>
+
+```{r q3_b, echo=FALSE, message=FALSE, fig.align='center', fig.width = 16, fig.height = 5, warning=FALSE}
+runtime %>% 
+  filter.(Runtime <= 180) %>% 
+  
+  ggplot(aes(x = Runtime)) +
+  geom_histogram(color = "grey20",
+                 fill = viridis(1, begin = 0.3),
+                 alpha = 0.8,
+                 binwidth = 10) +
+  geom_vline(aes(xintercept = mean(runtime$Runtime[runtime$Runtime <= 180])), color = "gold") +
+  geom_vline(aes(xintercept = median(runtime$Runtime[runtime$Runtime <= 180])), color = "orange") +
+
+  annotate("text", x = 1, y = 20000, 
+           hjust = 0,
+           label = c(paste("Mean:", 
+                           round(mean(runtime$Runtime[runtime$Runtime <= 180])), "mins.\n"),
+                     paste("Median:", 
+                           round(median(runtime$Runtime[runtime$Runtime <= 180])), "mins."))) +
+  
+  theme_light() +
+  theme(text = element_text(colour = "grey20", size = 12, face = "bold"),
+        axis.ticks = element_blank(), 
+        axis.title.y = element_blank(),
+        panel.border = element_rect(color = "grey20"), 
+        panel.grid = element_line(color = "grey65", linetype = "dotted"),
+        plot.margin = margin(0, 20, 0, 0)) +
+  scale_x_continuous(breaks = seq(0, 180, 60), labels = 0:3, expand = c(0,0)) +
+  scale_y_continuous(labels = comma, expand = c(0,0)) +
+  labs(x = "Runtime (Hours)",
+       title = "Histogram of Movie Runtime") -> q3_b_hist
+
+runtime %>% 
+  filter.(Runtime <= 180 & !is.na(Votes)) %>% 
+
+  ggplot(aes(x = Runtime, y = Rating)) +
+  geom_bin2d() +
+  geom_smooth(method = "lm", se = F, color = "gold") +
+  ggpubr::stat_cor(method = "pearson", 
+                   label.x = 70, label.y = 2.5,
+                   color = "white") +
+
+  theme_light() +
+  theme(text = element_text(colour = "grey20", size = 12, face = "bold"),
+        legend.position = "none",
+        axis.ticks = element_blank(), 
+        panel.grid = element_line(color = "grey65", linetype = "dotted"),
+        panel.border = element_rect(color = "grey20"),
+        plot.margin = margin(0, 20, 0, 0)) +
+  scale_x_continuous(breaks = seq(0, 180, 60), labels = 0:3, expand = c(0,0)) +
+  scale_y_continuous(breaks = 1:10, expand = c(0,0)) +
+  scale_fill_viridis(begin = 0.3, end = 0.9) +
+  labs(x = "Runtime (Hours)",
+       y = "Rating",
+       title = "2D Distribution of Movie Runtime and Ratings") -> q3_b_bindhist
+
+gridExtra::grid.arrange(q3_b_hist, q3_b_bindhist, ncol = 2)
+ggsave(paste0(loc.output, "Movie Runtime Hist.png"), gridExtra::arrangeGrob(q3_b_hist, q3_b_bindhist, ncol = 2), dpi = 320)
+```
+
+<p style="text-align:justify">
+We can see that most of the movies have a runtime between 1 to 2 hours. The 2D plot also shows that there is no correlation between the runtime and the rating of the movie.
+</p>
+
+```{r q3_a_b_clear, echo=FALSE, results='hide'}
+rm(list = ls(pattern = "q3_"))
+gcQuiet()
+```
+
+# What is the longest aggregate runtime of a trilogy?
+
+<p style="text-align:justify">
+Identifying movies as being part of a trilogy was a challenge in that the IMDB data alone is unable to do so. We thus scrape data from a Wikipedia **[article]**(https://en.wikipedia.org/wiki/List_of_feature_film_series_with_three_entries) that contains a list of film series with three entries. After cleaning the data, it was inserted as a table into the SQLite file. The next step is to attach the ratings from our IMDB data. As there is no clear way to match entries, we make use of the titles to do our string matching.
+</p>
+
+```{r q3_c, warning=FALSE}
+trilogies <- dbGetQuery(imdb_db, "SELECT * FROM wiki_trilogies")
+
+# First Attempt at Attaching Runtimes
+trilogies_try1 <- trilogies %>% 
+  pivot_longer.(cols = c("Entry_1", "Entry_2", "Entry_3"),
+                names_to = "EntryNum",
+                values_to = "Title") %>% 
+  arrange(as.numeric(SeriesId)) %>% 
+  
+  # Clean Data
+  mutate.(Year = stri_extract_last(Title, regex = "\\(\\d{4}.*\\)"),
+          Year = stri_replace_all_regex(Year, "\\(|\\)|[[:alpha:][:punct:]]", ""),
+          Year = as.integer(str_trim(word(Year, 1))),
+          Title = stri_replace_all_regex(Title, "\\*+|\\(.{1,2}\\)|\\(\\d{4}\\)", ""),
+          Title = stri_replace_all_regex(Title, "\\[.*\\]", ""),
+          TitleAKA = stri_extract_all_regex(Title, "\\(aka.*\\)"),
+          TitleAKA = stri_replace_all_regex(TitleAKA, "\\(|aka|\\)", ""),
+          TitleAKA = str_trim(str_squish(TitleAKA)),
+          Title = str_split_fixed(Title, "\\(aka", n = 2)[,1],
+          Title = stri_replace_all_regex(Title, "\\(.*\\)", ""),
+          Title = str_trim(str_squish(Title))) %>% 
+  
+  # Join with Runtime Data
+  left_join.(runtime[,c("tconst", "Title", "Year")], by = c("Title", "Year"))
+  
+kable(trilogies_try1[1:9], 
+      caption = "First Attempt at Matching") %>% 
+  kable_styling(c("hover", "condensed", "responsive")) %>% 
+  column_spec(7, background = "gold")
+```
+
+<p style="text-align:justify">
+The first attempt simply matches by both the title and year of release. As we can see, not all entries from Wikipedia were successfully matched as some `tconst` are `NULL`. We thus have to consider the following issues that cannot be adequately covered by this first attempt:
+</p>
+
+- Small differences in title formats
+- Small inconsistencies in release year
+- Titles within a series are often very similar to each other
+- We're using IMDB `primaryTitle` which could be different from Wikipedia
+- We're only considering IMDB titles of type `movie` and `tvMovie`
+- We've filtered the `runtime` table to those that have non-null `Runtime`
+
+For these reasons, a more involved approach is needed:
+
+- We measure **String Similarity** using the available algorithms
+  - We make use of both the [Levenshtein](https://en.wikipedia.org/wiki/Levenshtein_distance) (LV) distance and the full [Damerau-Levenshtein](https://en.wikipedia.org/wiki/Damerau%E2%80%93Levenshtein_distance) (DL) distance methods as they are appropriate to the operations that are relevant to movie titles: insertions, deletions or substitutions of a single character, or transposition of two adjacent characters (for DL only)
+  - We then set thresholds to consider as a valid match
+  - For the lower thresholds, we try to incorporate the distance between the years where we allot a maximum discrepancy of 2 year
+  - We also try if normalizing the strings to an extent can help, such as by:
+    - Removing whitespaces
+    - Change to all uppercase
+    - change Roman numerals to Arabic
+- Aside from the already existing `movie` and `tvMovie` titles, we also include `video` titles to complete the list as much as possible
+- If amenable, we also try to scrape missing data on runtimes
+
+First, let's create the functions needed.
+
+```{r q3_d, warning=FALSE}
+# Normalizing Function
+title_normalize <- function(t) {
+  t <- t %>% 
+    toupper() %>% 
+    str_replace("\\b[IVX]+\\b", function(x) as.numeric(as.roman(x))) %>% 
+    stri_replace_all_fixed(" ", "")
+
+  return(t)
+}
+
+# Matching Function
+title_match <- function(t, threshold = 0.8, method = "lv", year = NULL, 
+                        top_res = 2, year_threshold = 1, 
+                        target_title = "primaryTitle_target", 
+                        alt_title = c("originalTitle_target", "AKAtitle_target")) {
+
+  cat("\n>>> Trying", t)
+  if (is.na(year)) year <- NULL
+  
+  for (use in c(target_title, alt_title)) {
+    use_ <- str_replace(use, "_target", "")
+    res  <- stringsim(t, target[[use]], method = method)
+    
+    # Main --- --- --- --- --- --- ---
+    if (max(res, na.rm = T) >= threshold) {
+
+      max_res <- unique(order(res, decreasing = T))[1:top_res]
+
+      # Second --- --- --- --- --- --- ---
+      if (!is.null(year)) {
+        # Innermost --- --- --- --- --- --- ---
+        max_years <- target$startYear[max_res]
+        if (all(abs(year - max_years) > year_threshold) & !(year %fin% max_years))  { 
+          if (use != alt_title[length(alt_title)]) next else return(NA_character_) # All Fail
+        } else {
+          res <- unique(
+                  paste(use,
+                        unique(target[[use_]][max_res[which(max_years == year | abs(year - max_years) <= year_threshold)]]),
+                        unique(target$tconst[max_res[which(max_years == year | abs(year - max_years) <= year_threshold)]]), sep = "|")
+                )
+          res <- fifelse(length(res) > 1, "More than One", toString(res))
+          return(res)
+        }
+        # Innermost --- --- --- --- --- --- ---
+        
+      } else {
+        res <- paste(use,
+                     target[[use_]][max_res],
+                     target$tconst[max_res], sep = "|")
+        res <- fifelse(length(res) > 1, "More than One", toString(res))
+        return(res)
+      }
+      # Second --- --- --- --- --- --- ---
+      
+    } else if (use == alt_title[length(alt_title)]) {
+      return(NA_character_) # All Fail
+    } else {
+      next
+    }
+    # Main --- --- --- --- --- --- ---
+  }
+}
+
+# Wrapper Function
+title_match_use <- function(tconst, Title, Year, Title_input, ...) {
+  if (!is.na(tconst)) {
+    return(tconst)
+  } else {
+    title_match(t = Title_input, year = Year, ...)
+  }
+}
+```
+
+```{r q3_e_debug, include=FALSE}
+title_match_debug <- function(t, threshold = 0.8, method = "lv", year = NULL,
+                              top_res = 2, year_threshold = 1, 
+                              target_title = "primaryTitle_target", 
+                              alt_title = c("originalTitle_target", "AKAtitle_target")) {
+
+  if (is.na(year)) year <- NULL
+  
+  for (use in c(target_title, alt_title)) {
+    print(use)
+    use_ <- str_replace(use, "_target", "")
+    res  <- stringsim(t, target[[use]], method = method)
+    print(t)
+    print(max(res, na.rm = T))
+    # Main --- --- --- --- --- --- ---
+    if (max(res, na.rm = T) >= threshold) {
+      print("Entering Main A")
+      
+      max_res <- unique(order(res, decreasing = T))[1:top_res]
+      print(max_res)
+
+      # Second --- --- --- --- --- --- ---
+      if (!is.null(year)) {
+        print("Entering Second A")
+        # Innermost --- --- --- --- --- --- ---
+        max_years <- c(target$startYear[max_res])
+        print(max_years)
+        # if (abs(year - target$startYear[max_res]) > 2 & !year %fin% c(target$startYear[max_res])) {
+        if (all(abs(year - max_years) > year_threshold) & !(year %fin% max_years)) {
+          print("Entering Innermost A")
+          print(year)
+          print(target$startYear[max_res])
+          print(max_years)
+          if (use != alt_title[length(alt_title)]){
+            print("Entering Innermost C") 
+            next
+          } else {
+            return(NA_character_) # All Fail
+          } 
+        } else {
+          print("Entering Innermost B")
+          print(year)
+          # print(target$startYear[max_res])
+          print(max_years)
+          # return(max_years)
+          # print(which(max_years == year))
+          # print(max_res[which(max_years == year)])
+          # paste(unique(target[[use_]][max_res[which(max_years == year) ]]))
+          res <- paste(use,
+                       unique(target[[use_]][max_res[which(max_years == year | abs(year - max_years) <= year_threshold)]]),
+                       unique(target$tconst[max_res[which(max_years == year | abs(year - max_years) <= year_threshold)]]), sep = "|")
+          print(unique(res))
+          res <- fifelse(length(res) > 1, "More than One", toString(res))
+          return(res)
+        }
+        # Innermost --- --- --- --- --- --- ---
+        
+      } else {
+        print("Entering Second B")
+        res <- paste(use,
+                     target[[use_]][max_res],
+                     target$tconst[max_res], sep = "|")
+        res <- fifelse(length(res) > 1, "More than One", toString(res))
+        return(res)
+      }
+      # Second --- --- --- --- --- --- ---
+      
+    } else if (use == alt_title[length(alt_title)]) {
+      print("Entering Main C")
+      return(NA_character_) # All Fail
+    } else {
+      print("Entering Main B")
+      next
+    }
+    # Main --- --- --- --- --- --- ---
+  }
+}
+
+title_match_use_debug <- function(tconst, Title, Year, Title_input, ...) {
+  if (!is.na(tconst)) {
+    return(tconst)
+  } else {
+    title_match_debug(t = Title_input, year = Year, ...)
+  }
+}
+
+# title_match_debug("NOWORNEVER", year = 1998)
+# title_match_debug("FASTCOMPANY", year = NA)
+# title_match_debug("IVANGROZNYY3", year = 1988)
+# title_match_debug("APARAJITO", year = 1957)
+# title_match_debug("BOONIEBEARS3", year = 2016)
+```
+
+Let's now try a second attempt at matching titles.
+
+```{r q3_e, warning=FALSE, include=TRUE}
+# Create New Normalized Target
+target <- fread(paste0(loc.imdb, "title-basics.tsv"), sep = "\t",
+                quote = "", na.strings = "\\N", encoding = "UTF-8",
+                select = c("tconst", "titleType", "primaryTitle", 
+                           "originalTitle", "runtimeMinutes", "startYear")) %>% 
+  
+  # Filter to Movies and startYear Until 2020 Only 
+  filter.(titleType %fin% c("movie", "tvMovie", "video") & startYear < 2021) %>% 
+  
+  left_join.(
+     fread(paste0(loc.imdb, "title-akas.tsv"), sep = "\t",
+           quote = "", na.strings = "\\N", encoding = "UTF-8",
+           select = c("titleId", "title", "isOriginalTitle"), 
+           col.names = c("titleId", "AKAtitle", "isOriginalTitle")) %>% 
+       filter.(isOriginalTitle == 0) %>% 
+       select.(-isOriginalTitle) %>% 
+       distinct.(),
+  by = c("tconst" = "titleId")) %>% 
+
+  # Normalize Titles
+  mutate.(primaryTitle_target = title_normalize(primaryTitle),
+          originalTitle_target = title_normalize(originalTitle),
+          AKAtitle_target = title_normalize(AKAtitle))
+
+# Second Attempt
+run_string_match <- F
+
+if (run_string_match & !file.exists(paste0(loc.output, "trilogies_try2 - ", Sys.Date(),".RDS"))) {
+  
+  trilogies_try2 <- trilogies_try1 %>% 
+    
+    # String Matching of Titles
+    mutate.(Title_input = title_normalize(Title)) %>%
+    
+    # MATCH 1
+    mutate.(Match1_dl_.95_tr1_yt0 = pmap_chr(list(tconst, Title, Year, Title_input,
+                                                  method = list("dl"),
+                                                  threshold = list(0.95),
+                                                  top_res = list(1),
+                                                  year_threshold = list(0)), title_match_use)) %>%
+    pipe_message(paste("\n>>> Done with String Matching using DL, Thresh = 0.95, Top 1 Sim, Year Thresh 0 at",
+                       format(Sys.time(), "%r")), crayon_f = "green") %>%
+
+    # MATCH 2
+    mutate.(Match2_dl_.95_tr1_yt1 = pmap_chr(list(tconst = Match1_dl_.95_tr1_yt0, Title, Year, Title_input,
+                                                  method = list("dl"),
+                                                  threshold = list(0.95),
+                                                  top_res = list(1),
+                                                  year_threshold = list(1)), title_match_use)) %>%
+    pipe_message(paste("\n>>> Done with String Matching using DL, Thresh = 0.95, Top 1 Sim, Year Thresh 1 at",
+                       format(Sys.time(), "%r")), crayon_f = "green") %>%
+    
+    # MATCH 3
+    mutate.(Match3_dl_.95_tr1_yt2 = pmap_chr(list(tconst = Match2_dl_.95_tr1_yt1, Title, Year, Title_input,
+                                                  method = list("dl"),
+                                                  threshold = list(0.95),
+                                                  top_res = list(1),
+                                                  year_threshold = list(2)), title_match_use)) %>% 
+    pipe_message(paste("\n>>> Done with String Matching using DL, Thresh = 0.95, Top 1 Sim, Year Thresh 2 at",
+                       format(Sys.time(), "%r")), crayon_f = "green") %>% 
+    
+    # MATCH 4
+    mutate.(Match4_lv_.80_tr1_yt0 = pmap_chr(list(tconst = Match3_dl_.95_tr1_yt2, Title, Year, Title_input,
+                                                  top_res = list(1),
+                                                  year_threshold = list(0)), title_match_use)) %>% 
+    pipe_message(paste("\n>>> Done with String Matching using LV, Thresh = 0.80, Top 1 Sim, Year Thresh 0 at",
+                       format(Sys.time(), "%r")), crayon_f = "green") %>% 
+    
+    # MATCH 5
+    mutate.(Match5_lv_.80_tr1_yt1 = pmap_chr(list(tconst = Match4_lv_.80_tr1_yt0, Title, Year, Title_input,
+                                                  top_res = list(1),
+                                                  year_threshold = list(1)), title_match_use)) %>% 
+    pipe_message(paste("\n>>> Done with String Matching using LV, Thresh = 0.80, Top 1 Sim, Year Thresh 1 at",
+                       format(Sys.time(), "%r")), crayon_f = "green") %>% 
+    
+    # MATCH 6
+    mutate.(Match6_lv_.80_tr2_yt0 = pmap_chr(list(tconst = Match5_lv_.80_tr1_yt1, Title, Year, Title_input,
+                                                  top_res = list(2),
+                                                  year_threshold = list(0)), title_match_use)) %>% 
+    pipe_message(paste("\n>>> Done with String Matching using LV, Thresh = 0.80, Top 2 Sim, Year Thresh 0 at",
+                       format(Sys.time(), "%r")), crayon_f = "green") %>% 
+    
+    # MATCH 7
+    mutate.(Match7_lv_.70_tr1_yt0 = pmap_chr(list(tconst = Match6_lv_.80_tr2_yt0, Title, Year, Title_input,
+                                                  threshold = list(0.70),
+                                                  top_res = list(1),
+                                                  year_threshold = list(0)), title_match_use)) %>% 
+    pipe_message(paste("\n>>> Done with String Matching using LV, Thresh = 0.70, Top 1 Sim, Year Thresh 0 at",
+                       format(Sys.time(), "%r")), crayon_f = "green") %>% 
+    
+    # FINAL MATCH
+    mutate.(Match_Final = coalesce(Match1_dl_.95_tr1_yt0, 
+                                   Match2_dl_.95_tr1_yt1,
+                                   Match3_dl_.95_tr1_yt2,
+                                   Match4_lv_.80_tr1_yt0,
+                                   Match5_lv_.80_tr1_yt1,
+                                   Match6_lv_.80_tr2_yt0,
+                                   Match7_lv_.70_tr1_yt0)) %>% 
+    pipe_message(paste("\n>>> ALL MATCHING DONE at", format(Sys.time(), "%r")), crayon_f = "bgGreen")
+  
+  # Save Output File
+  saveRDS(trilogies_try2, paste0(loc.output, "trilogies_try2 - ", Sys.Date(),".RDS"))
+  saveRDS(trilogies_try2, paste0(loc.output, "trilogies_try2 - Latest.RDS"))
+  
+} else {
+  
+  tryCatch({
+    trilogies_try2 <- readRDS(paste0(loc.output, "trilogies_try2 - Latest.RDS"))
+  }, error = function(e) {
+    trilogies_try2 <- readRDS(paste0(loc.output, "trilogies_try2 - ", Sys.Date(),".RDS"))
+  })
+  
+}
+```
+
+```{r q3_f, echo=FALSE}
+kable(trilogies_try2[1:9, c("Series", "Title", "Title_input", "Match_Final")], 
+      caption = "Second Attempt at Matching",
+      col.names = c("Series", "Title", "Normalized Title", "Final Matching Result")) %>% 
+  kable_styling(c("hover", "condensed", "responsive")) %>% 
+  column_spec(4, background = "gold")
+```
+
+<p style="text-align:justify">
+In the first attempt, out of the **2030** titles, **`r sum(!is.na(trilogies_try2$tconst))`** were successfully matched with the IMDB data. Using the flow and algorithm of string matching, we were able to bring that number up to **`r sum(!is.na(trilogies_try2$Match_Final))`**. We now compute the aggregate runtime of the series with entries that have complete information.
+</p>
+
+```{r q3_g, warning=FALSE}
+trilogies_fin <- trilogies_try2 %>% 
+  
+  # Get Final tconst
+  filter.(!is.na(Match_Final) & Match_Final != "More than One") %>% 
+  select.(-tconst) %>% 
+  mutate.(tconst_final = fifelse(stri_detect_fixed(Match_Final, "|"), 
+                                 word(Match_Final, 3, sep = "\\|"), 
+                                 Match_Final)) %>% 
+  
+  # Get Series with Complete Entries
+  mutate.(valid = n_distinct(tconst_final), .by = SeriesId) %>% 
+  filter.(valid == 3) %>% 
+  
+  # Get Runtimes
+  left_join.(target[, c("tconst", "runtimeMinutes")], by = c("tconst_final" = "tconst")) %>% 
+  distinct.() %>% 
+  mutate.(valid_runtime = sum(!is.na(runtimeMinutes)), .by = SeriesId) %>% 
+  filter.(valid_runtime == 3) %>% 
+  
+  # Aggregate Runtimes
+  summarise.(Titles = toString(paste0(Title, " (", Year,")", collapse = ",\n")),
+             AggRuntime = sum(runtimeMinutes), .by = Series) %>% 
+  mutate.(AggRuntime_Hours = round(AggRuntime/60, 2))
+
+trilogies_fin %>%
+  slice_max.(order_by = AggRuntime, n = 5) %>% 
+  kable(caption = "Top 5 Trilogies with Longest Aggregate Runtime",
+        col.names = c("Series", "Titles", "Agg. Runtime (Mins.)", "Agg. Runtime (Hrs)")) %>% 
+  kable_styling(c("hover", "condensed", "responsive"))
+```
+
+<p style="text-align:justify">
+Thus the movie trilogy with the longest aggregate runtime is the **Flash Gordon** serials followed by the **Trilogy of Henryk Sienkiewicz**.
+</p>
+
+```{r q3_c_d_e_f_g_clear, echo=FALSE, results='hide', warning=FALSE}
+rm(runtime, target, trilogies, trilogies_try1)
+gcQuiet()
+```
+
+# Have there been changes in trend in movie genres in the past 10 years?
+
+<p style="text-align:justify">
+For this question, we can look at the `mainGenre`, `subGenre1`, and `subGenre2` columns from the `title_basics` table. We'll be filtering to movies released starting in 2011. We will also look at **trend** in terms of:
+</p>
+
+- The number of movies within each genre as a measure of popularity
+- The average rating of the movies within each genre
+- Their rankings based on these metrics over time
+
+```{r q4_a}
+query.genres <- "
+   SELECT t_basics.tconst,
+          t_basics.primaryTitle AS Title,
+          t_basics.startYear AS Year,
+          t_basics.mainGenre,
+          t_basics.subGenre1,
+          t_basics.subGenre2,
+          t_basics.NumGenres,
+          t_rating.averageRating AS Rating,
+          t_rating.numVotes AS Votes
+     FROM title_basics AS t_basics
+LEFT JOIN title_rating AS t_rating ON t_basics.tconst = t_rating.tconst
+    WHERE t_basics.startYear >= 2011
+      AND t_basics.NumGenres > 0
+"
+
+genres <- dbGetQuery(imdb_db, query.genres)
+genres
+```
+
+<p style="text-align:justify">
+The resulting data has `r n_distinct(c(genres$mainGenre, genres$subGenre1, genres$subGenre2), na.rm = T)` unique genres consisting of: `r paste(unique(na.omit(c(genres$mainGenre, genres$subGenre1, genres$subGenre2))), collapse = ",\n")`.
+</p>
+
+```{r q4_b, echo=FALSE, warning=FALSE, fig.align='center', fig.width = 20, fig.height = 10, message=FALSE}
+# Colors DF
+color_df <- data.frame(Rank = 1:10, 
+                       col_use = viridis(10), 
+                       Year = 2020)
+
+
+genres_unweighted <- genres %>% 
+  
+  # Pivot Longer and Count # of Movies
+  select.(tconst, Year, mainGenre, subGenre1, subGenre2) %>%
+  pivot_longer.(cols = contains("Genre"), names_to = "GenreType", values_to = "Genre") %>% 
+  filter.(!is.na(Genre)) %>% 
+  summarise.(Movies = n_distinct(tconst), .by = c(Year, Genre)) %>% 
+  arrange.(Year, Genre) %>% 
+  mutate.(Year = as.integer(Year),
+          Rank = rank(-Movies, ties.method = "first"), .by = Year) %>% 
+  mutate.(Delta = Rank - lag(Rank, order_by = Year, n = 9), .by = c(Genre)) %>% 
+  mutate.(Direction = case_when(Delta > 0 ~ "Positive",
+                                Delta < 0 ~ "Negative",
+                                TRUE ~ "Same"))  %>% 
+  left_join.(color_df, by = c("Rank", "Year")) %>% 
+  mutate.(col_use = na.omit(col_use), .by = Genre) %>% 
+  mutate.(col_line = ifelse(is.na(col_use), "grey90", col_use),
+          alp_line = ifelse(is.na(col_use), 0.3, 0.7),
+          col_point = case_when(!is.na(col_use) & Direction == "Positive" ~ viridis(1, begin = .6, option = "C"),
+                                !is.na(col_use) & Direction == "Negative" ~ viridis(1, begin = .7)),
+          shp_point = case_when(!is.na(col_use) & Direction == "Positive" ~ 25,
+                                !is.na(col_use) & Direction == "Negative" ~ 24))
+
+# Plot  
+genres_unweighted %>% 
+  
+  ggplot(aes(x = Year, y = Rank, group = Genre)) +
+  geom_line(aes(color = I(col_line), alpha = I(alp_line)), size = 1.35) +
+  geom_point(aes(shape = I(shp_point), fill = I(col_point), color = I(col_point)), size = 3) + 
+
+  geom_text(data = genres_unweighted %>% 
+              filter.(Year == 2011) %>% 
+              mutate.(try_size = ifelse(Rank %in% 1:10, 4, 3)),
+            aes(label = Genre, x = 2011 - 0.12, size = try_size) , 
+            hjust = 1, vjust = 0.5, color = "grey50", fontface = "bold") +
+  geom_text(data = genres_unweighted %>% 
+              filter.(Year == 2020) %>% 
+              mutate.(try_size = ifelse(Rank %in% 1:10, 4, 3)),
+            aes(label = Genre, x = 2020 + 0.12, size = try_size) , 
+            hjust = 0, vjust = 0.5, color = "grey50", fontface = "bold") +
+  
+  theme_light() +
+  theme(text = element_text(size = 10),
+        title = element_text(colour = "grey20", size = 10, face = "bold"),
+        plot.subtitle = element_text(face = "italic"),
+        legend.position = "none",
+        axis.ticks = element_blank(), 
+        panel.grid = element_line(color = "grey65", linetype = "dotted"),
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        panel.border = element_rect(color = "grey20"),
+        plot.margin = margin(0, 20, 0, 0)) +
+  scale_x_continuous(breaks = 2011:2020, expand = c(0.13, 0.13)) +
+  scale_y_reverse(breaks = 1:27, expand = c(.025, .025)) +
+  scale_size(range = c(3,4), guide = F) +
+  labs(x = "Year",
+       y = "Unweighted Rank",
+       title = "Rankings of Genre by # of Movies",
+       subtitle = "The rankings are relatively stable, topped by Drama and Documentary") -> q4_b_unweighted
+
+genres_weighted <- genres %>% 
+  
+  # Pivot Longer and Count # of Movies and Popularity
+  select.(tconst, Year, mainGenre, subGenre1, subGenre2, Rating, Votes) %>%
+  pivot_longer.(cols = contains("Genre"), names_to = "GenreType", values_to = "Genre") %>% 
+  mutate.(Pop = sum(Rating*Votes, na.rm = T), .by = c(Year, Genre)) %>%
+  distinct.() %>% 
+  filter.(!is.na(Genre) & !is.na(Pop)) %>% 
+  summarise.(Movies = Pop/n_distinct(tconst), .by = c(Year, Genre)) %>% 
+  distinct.() %>% 
+  arrange.(Year, Genre) %>% 
+  mutate.(Year = as.integer(Year),
+          Rank = rank(-Movies, ties.method = "first"), .by = Year) %>% 
+  mutate.(Delta = Rank - lag(Rank, order_by = Year, n = 9), .by = Genre) %>% 
+  mutate.(Direction = case_when(Delta > 0 ~ "Positive",
+                                Delta < 0 ~ "Negative",
+                                TRUE ~ "Same"))  %>% 
+  left_join.(color_df, by = c("Rank", "Year")) %>% 
+  mutate.(col_use = na.omit(col_use), .by = Genre) %>% 
+  mutate.(col_line = ifelse(is.na(col_use), "grey90", col_use),
+          alp_line = ifelse(is.na(col_use), 0.3, 0.7),
+          col_point = case_when(!is.na(col_use) & Direction == "Positive" ~ viridis(1, begin = .6, option = "C"),
+                                !is.na(col_use) & Direction == "Negative" ~ viridis(1, begin = .7)),
+          shp_point = case_when(!is.na(col_use) & Direction == "Positive" ~ 25,
+                                !is.na(col_use) & Direction == "Negative" ~ 24))
+
+# Plot
+genres_weighted %>% 
+  
+  ggplot(aes(x = Year, y = Rank, group = Genre)) +
+  geom_line(aes(color = I(col_line), alpha = I(alp_line)), size = 1.35) +
+  geom_point(aes(shape = I(shp_point), fill = I(col_point), color = I(col_point)), size = 3) + 
+
+  geom_text(data = genres_weighted %>% 
+              filter.(Year == 2011) %>% 
+              mutate.(try_size = ifelse(Rank %in% 1:10, 4, 3)),
+            aes(label = Genre, x = 2011 - 0.12, size = try_size) , 
+            hjust = 1, vjust = 0.5, color = "grey50", fontface = "bold") +
+  geom_text(data = genres_weighted %>% 
+              filter.(Year == 2020) %>% 
+              mutate.(try_size = ifelse(Rank %in% 1:10, 4, 3)),
+            aes(label = Genre, x = 2020 + 0.12, size = try_size) , 
+            hjust = 0, vjust = 0.5, color = "grey50", fontface = "bold") +
+  
+  theme_light() +
+  theme(text = element_text(size = 10),
+        title = element_text(colour = "grey20", size = 10, face = "bold"),
+        plot.subtitle = element_text(face = "italic"),
+        legend.position = "none",
+        axis.ticks = element_blank(), 
+        panel.grid = element_line(color = "grey65", linetype = "dotted"),
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        panel.border = element_rect(color = "grey20"),
+        plot.margin = margin(0, 20, 0, 0)) +
+  scale_x_continuous(breaks = 2011:2020, expand = c(0.13, 0.13)) +
+  scale_y_reverse(breaks = 1:27, expand = c(.025, .025)) +
+  scale_size(range = c(3,4), guide = F) +
+  labs(x = "Year",
+       y = "Weighted Rank",
+       title = "Rankings of Genre by # of Movies and their Popularity",
+       subtitle = "The rankings have changed a lot over time. Newly popular compared to 2011 are History, Biography, and Comedy") -> q4_b_weighted
+
+gridExtra::grid.arrange(q4_b_unweighted, q4_b_weighted, nrow = 1)
+ggsave(paste0(loc.output, "Genre Rankings.png"), gridExtra::arrangeGrob(q4_b_unweighted, q4_b_weighted, nrow = 1), dpi = 320)
+```
+
+<p style="text-align:justify">
+Another approach is to observe the changes in the average/median ratings by genre, comparing 2011 to 2020 numbers.
+</p>
+
+```{r q4_c, echo=FALSE, warning=FALSE, fig.align='center', fig.width = 16, fig.height = 10, message=FALSE}
+genres_rating <- genres %>% 
+
+  # Pivot Longer and Compute Mean/Median Rating
+  filter.(Year %fin% c(2011, 2020) & !is.na(Rating)) %>% 
+  select.(Year, mainGenre, subGenre1, subGenre2, Rating) %>% 
+  pivot_longer.(cols = contains("Genre"), names_to = "GenreType", values_to = "Genre") %>% 
+  filter.(!is.na(Genre)) %>% 
+  summarise.(Med_Rating = median(Rating, na.rm = T),
+             Avg_Rating = round(mean(Rating, na.rm = T), 4), .by = c(Year, Genre)) %>% 
+  arrange.(Year, Genre) %>% 
+  mutate.(Year = as.integer(Year)) %>% 
+  mutate.(Count = n_distinct(Year), .by = Genre) %>% 
+  filter.(Count == 2)
+
+# Plot
+genres_rating %>% 
+  left_join.(
+    genres_rating %>% 
+      pivot_wider(names_from = "Year", values_from = "Avg_Rating", 
+                  id_cols = "Genre", names_prefix = "Year_") %>% 
+      mutate.(Diff = ifelse(Year_2020 - Year_2011 > 0, "Up", "Down"),
+              Diff_Mean = round(Year_2020 - Year_2011, 2)),
+  by = "Genre") %>% 
+  mutate.(Genre = factor(Genre, levels = Genre[order(Avg_Rating[Year == 2020])])) %>% 
+  
+  ggplot(aes(x = Avg_Rating, y = (Genre))) +
+  geom_line(aes(group = Genre), size = 1.15, color = "grey50") +
+  geom_path(aes(color = Diff),
+            arrow = arrow(length = unit(0.10, "in", )),
+            linejoin = "mitre", size = 1.15) +
+  geom_point(aes(color = as.character(Year)), size = 4) + 
+  geom_point(aes(color = Diff), size = 4, pch = 21) +
+  geom_rect(aes(xmin = 4, xmax = 4.25, ymin = -Inf, ymax = Inf), fill = "grey95") +
+  geom_text(aes(x = 4.125, label = Diff_Mean, color = Diff), size = 3.5, fontface = "bold") +
+  geom_rect(aes(xmin = 7.75, xmax = 8, ymin = -Inf, ymax = Inf), fill = "grey95") +
+  geom_text(aes(x = 7.875, label = round(Year_2020, 2)), size = 3.5, fontface = "bold", color = "grey50") +
+  
+  annotate("text", x = 4.125, y = "Documentary", label = "Diff.", vjust = -1.5,
+           size = 4, fontface = "bold") +
+  annotate("text", x = 7.875, y = "Documentary", label = "2020 Avg.", vjust = -1.5,
+           size = 4, fontface = "bold") +
+  annotate("text", 
+           x = genres_rating$Avg_Rating[genres_rating$Year == 2011 & genres_rating$Genre == "Documentary"], 
+           y = "Documentary", label = "2011", size = 3, fontface = "bold", vjust = -1.5) +
+  annotate("text", 
+           x = genres_rating$Avg_Rating[genres_rating$Year == 2020 & genres_rating$Genre == "Documentary"], 
+           y = "Documentary", label = "2020", color = viridis(1, begin = .35), size = 3, fontface = "bold", vjust = -1.5) +
+  
+  theme_light() +
+  theme(text = element_text(colour = "grey20", size = 12, face = "bold"),
+        plot.subtitle = element_text(face = "italic"),
+        legend.position = "none",
+        axis.ticks = element_blank(), 
+        panel.grid = element_line(color = "grey65", linetype = "dotted"),
+        # panel.grid.major.y = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        # panel.grid.major.x = element_blank(),
+        panel.border = element_rect(color = "grey20"),
+        plot.margin = margin(0, 20, 0, 0)) +
+  scale_x_continuous(breaks = 4:8,  limits = c(4, 8), 
+                     expand = c(0, 0)) +
+  scale_y_discrete(expand = c(0.06, 0.06)) +
+  scale_color_manual(values = c("black", viridis(1, begin = .35), 
+                                viridis(1, begin = .6, option = "C"), viridis(1, begin = .7))) +
+  labs(x = "Average Rating",
+       y = "Genre",
+       title = "Average Rating by Genre in 2011 and in 2020",
+       subtitle = paste("The Genre with the highest rating in 2020 is Documentary.",
+                        "Reality-TV had the largest decrease while Animation had the largest increase in the last decade."))
+
+ggsave(paste0(loc.output, "Average Ratings by Genre.png"), dpi = 320)
+```
+
+```{r q4_a_b_c_clear, echo=FALSE, results='hide', warning=FALSE}
+rm(list = ls(pattern = "genres_|q4"))
+gcQuiet()
+```
